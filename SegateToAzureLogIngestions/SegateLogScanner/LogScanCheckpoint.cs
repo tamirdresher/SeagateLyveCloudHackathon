@@ -10,6 +10,7 @@ namespace SegateLogScanner
         public const string CheckpointId = "Checkpoint";
 
         public string Id { get; set; } = CheckpointId;
-        public string LastLog { get; set; }
+        public DateTime LastModificationTime { get; set; }
+        public string LastContinuationToken { get; set; }
     }
 }

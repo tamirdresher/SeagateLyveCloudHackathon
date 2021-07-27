@@ -36,7 +36,7 @@ namespace SegateLogScanner
             [Table("logrunscheckpoint", Connection = "AzureWebJobsStorage")] CloudTable logsCheckpoint)
         {
 
-            var lastFile = await GetLastCheckpointFileAsync(logsCheckpoint) ?? "";
+            var checkpoint = await GetLastCheckpointFileAsync(logsCheckpoint);
             _log.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
 
             ConnectLyveS3();
@@ -44,18 +44,33 @@ namespace SegateLogScanner
 
             S3Bucket logsBucket = await GetLogsBucket();
 
-            var files = await _s3Client.ListObjectsV2Async(new ListObjectsV2Request { BucketName = logsBucket.BucketName, StartAfter = lastFile });
+            ListObjectsV2Request request = new ListObjectsV2Request { BucketName = logsBucket.BucketName };
+            var lastModificationTime = DateTime.MinValue;
+            if (checkpoint?.LastContinuationToken!=null)
+            {
+                request.ContinuationToken = checkpoint.LastContinuationToken;
+                lastModificationTime = checkpoint.LastModificationTime;
+            }
+            var files = await _s3Client.ListObjectsV2Async(request);
+
             var nextContinuation = files.NextContinuationToken;
-            List<S3Object> allFiles = files.S3Objects.Where(x => x.Key.EndsWith("gz")).ToList();
+            List<S3Object> allFiles = files.S3Objects
+                .Where(x => x.Key.EndsWith("gz"))
+                .Where(x => x.LastModified > lastModificationTime)
+                .ToList();
             while (true)
             {
                 var results = await _s3Client.ListObjectsV2Async(new ListObjectsV2Request { BucketName = logsBucket.BucketName, ContinuationToken = nextContinuation });
 
                 allFiles.AddRange(results.S3Objects.Where(x => x.Key.EndsWith("gz")));
-                nextContinuation = results.NextContinuationToken;
-                if (nextContinuation == null)
+                
+                if (results.NextContinuationToken == null)
                 {
                     break;
+                }
+                else
+                {
+                    nextContinuation = results.NextContinuationToken;
                 }
             }
             allFiles = allFiles.OrderByDescending(x => x.LastModified).ToList();
@@ -71,12 +86,12 @@ namespace SegateLogScanner
                 });
             }
 
-            await SetCheckpointAsync(logsCheckpoint, allFiles.FirstOrDefault()?.Key);
+            await SetCheckpointAsync(logsCheckpoint, allFiles.FirstOrDefault(), nextContinuation);
         }
 
-        private async Task SetCheckpointAsync(CloudTable logsCheckpoint, string logFile)
+        private async Task SetCheckpointAsync(CloudTable logsCheckpoint, S3Object logFile, string continuationToken)
         {
-            if (string.IsNullOrEmpty(logFile))
+            if (logFile==null)
             {
                 return;
             }
@@ -85,18 +100,19 @@ namespace SegateLogScanner
             {
                 PartitionKey = LogScanCheckpoint.CheckpointId,
                 RowKey = LogScanCheckpoint.CheckpointId,
-                LastLog = logFile,
+                LastModificationTime = logFile.LastModified,
+                LastContinuationToken=continuationToken,
                 ETag="*"
             };
             var operation = TableOperation.InsertOrReplace(checkpoint);
             await logsCheckpoint.ExecuteAsync(operation);
         }
 
-        private async Task<string> GetLastCheckpointFileAsync(CloudTable logsCheckpoint)
+        private async Task<LogScanCheckpoint> GetLastCheckpointFileAsync(CloudTable logsCheckpoint)
         {
             var result = await logsCheckpoint.ExecuteAsync(TableOperation.Retrieve<LogScanCheckpoint>(LogScanCheckpoint.CheckpointId, LogScanCheckpoint.CheckpointId));
             var checkpoint = result.Result as LogScanCheckpoint;
-            return checkpoint?.LastLog;
+            return checkpoint;
         }
 
         private async Task<S3Bucket> GetLogsBucket()
