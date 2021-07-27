@@ -1,4 +1,4 @@
-#Seagate Log Ingestion to Azure Monitor
+# Seagate Log Ingestion to Azure Monitor
 
 This sample project provide an intergation betweeen Seagate LyveCloud storage logs and Azure Monitor (Azure Log Analytics).
 The application is build using Azure Functions that periodically scan for new log files in LyveCloud and then stream them into Azure Log Analytics workspace.
@@ -23,7 +23,7 @@ The app use the following setting which you can set inside the appsettings.json 
 * LogAnalyticsWorkspaceID - the workspace id of the Azure Log Analytics workspace (can be found inside the Agents management settings of the workspace)
 * LogAnalyticsKey - the Log Analytics Primary/Secondary key (can be found inside the Agents management settings of the workspace)
 * LogAnalyticsLogName - The name of the log inside the Log Analytics workspace to which the LyveCloud Logs will be ingested
-* LogAnalyticsTimestampField": The name of the field from the LyveCloud logs which should be used as the timestamp (e.g. auditEntry_time)
+* LogAnalyticsTimestampField - The name of the field from the LyveCloud logs which should be used as the timestamp (e.g. auditEntry_time)
 
 # Sample Log Analytics Queries
 Once the logs are inside the Azure Log Analytics you can run various queries and create visualization 
