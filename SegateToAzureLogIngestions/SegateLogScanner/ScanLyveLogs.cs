@@ -1,0 +1,126 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using Amazon.S3;
+using Amazon.S3.Model;
+using Contracts;
+using Microsoft.Azure.WebJobs;
+using Microsoft.Azure.WebJobs.Host;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.WindowsAzure.Storage.Table;
+
+namespace SegateLogScanner
+{
+    public class ScanLyveLogs
+    {
+        private AmazonS3Client _s3Client;
+        private readonly IConfiguration _configuration;
+        private readonly ILogger<ScanLyveLogs> _log;
+        public const string BucketNameKey = "BucketName";
+        public const string LyveUrlKey = "LyveUrl";
+        public const string LyveAccessKey = "LyveAccessKey";
+        public const string LyveSecretKey = "LyveSecretKey";
+
+        public ScanLyveLogs(IConfiguration configuration, ILogger<ScanLyveLogs> log)
+        {
+            _configuration = configuration;
+            _log = log;
+        }
+
+        [FunctionName("ScanLyveLogs")]
+        public async Task Run([Queue("logFiles"), StorageAccount("AzureWebJobsStorage")] ICollector<ScanLyveLogFileRequest> queue,
+            [TimerTrigger("0 */5 * * * *")] TimerInfo timer,
+            [Table("logrunscheckpoint", Connection = "AzureWebJobsStorage")] CloudTable logsCheckpoint)
+        {
+
+            var lastFile = await GetLastCheckpointFileAsync(logsCheckpoint) ?? "";
+            _log.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
+
+            ConnectLyveS3();
+            _log.LogInformation($"Connected to Lyve S3: {DateTime.Now}");
+
+            S3Bucket logsBucket = await GetLogsBucket();
+
+            var files = await _s3Client.ListObjectsV2Async(new ListObjectsV2Request { BucketName = logsBucket.BucketName, StartAfter = lastFile });
+            var nextContinuation = files.NextContinuationToken;
+            List<S3Object> allFiles = files.S3Objects.Where(x => x.Key.EndsWith("gz")).ToList();
+            while (true)
+            {
+                var results = await _s3Client.ListObjectsV2Async(new ListObjectsV2Request { BucketName = logsBucket.BucketName, ContinuationToken = nextContinuation });
+
+                allFiles.AddRange(results.S3Objects.Where(x => x.Key.EndsWith("gz")));
+                nextContinuation = results.NextContinuationToken;
+                if (nextContinuation == null)
+                {
+                    break;
+                }
+            }
+            allFiles = allFiles.OrderByDescending(x => x.LastModified).ToList();
+
+            _log.LogInformation($"Got {allFiles.Count()} new log files between {timer.ScheduleStatus.Last} to {DateTime.Now} ");
+
+            foreach (var file in allFiles)
+            {
+                queue.Add(new ScanLyveLogFileRequest
+                {
+                    BucketName = logsBucket.BucketName,
+                    FileUrl = file.Key
+                });
+            }
+
+            await SetCheckpointAsync(logsCheckpoint, allFiles.FirstOrDefault()?.Key);
+        }
+
+        private async Task SetCheckpointAsync(CloudTable logsCheckpoint, string logFile)
+        {
+            if (string.IsNullOrEmpty(logFile))
+            {
+                return;
+            }
+
+            var checkpoint = new LogScanCheckpoint()
+            {
+                PartitionKey = LogScanCheckpoint.CheckpointId,
+                RowKey = LogScanCheckpoint.CheckpointId,
+                LastLog = logFile,
+                ETag="*"
+            };
+            var operation = TableOperation.InsertOrReplace(checkpoint);
+            await logsCheckpoint.ExecuteAsync(operation);
+        }
+
+        private async Task<string> GetLastCheckpointFileAsync(CloudTable logsCheckpoint)
+        {
+            var result = await logsCheckpoint.ExecuteAsync(TableOperation.Retrieve<LogScanCheckpoint>(LogScanCheckpoint.CheckpointId, LogScanCheckpoint.CheckpointId));
+            var checkpoint = result.Result as LogScanCheckpoint;
+            return checkpoint?.LastLog;
+        }
+
+        private async Task<S3Bucket> GetLogsBucket()
+        {
+            ListBucketsResponse response = await _s3Client.ListBucketsAsync();
+            var logsBucket = response.Buckets.FirstOrDefault(b => b.BucketName == _configuration[BucketNameKey]);
+            if (logsBucket == null)
+            {
+                throw new Exception($"Bucket named '{_configuration[BucketNameKey]}' doesn't exists. Can't get logs from Lyve S3");
+            }
+
+            return logsBucket;
+        }
+
+        private void ConnectLyveS3()
+        {
+            AmazonS3Config config = new AmazonS3Config();
+            config.ServiceURL = _configuration[LyveUrlKey];
+            _s3Client = new AmazonS3Client(
+                    _configuration[LyveAccessKey],
+                    _configuration[LyveSecretKey],
+                    config
+                    );
+        }
+
+    }
+}
